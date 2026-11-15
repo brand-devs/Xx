@@ -43,7 +43,7 @@ local State = {
 	smoothing = true, smoothness = 5.0,
 	drawFov = false, fovRadius = 120, fovColor = Color3.fromRGB(255, 64, 80),
 	visibleCheck = true, teamCheck = false, aliveCheck = true,
-	openAnim = "fade", dim = 20, uiTransparency = 0,
+	openAnim = "pop", dim = 20, uiTransparency = 0,
 }
 
 State.brand = { a = "NAURU", b = "HUB", name = "Nauru Hub", tag = "beta" }
@@ -151,6 +151,65 @@ local function createLabel(parent, text, size, color, font, props)
 	if p.FontFace then p.Font = nil end
 	return create("TextLabel", p, parent)
 end
+
+-- measures how tall a piece of text is once wrapped to `width`
+function State.textH(text, size, font, width)
+	local ok, v = pcall(function()
+		return game:GetService("TextService"):GetTextSize(text, size, font, Vector2.new(math.max(10, width), 10000)).Y
+	end)
+	return ok and math.ceil(v) or math.ceil(size * 1.25)
+end
+
+-- a wrapped title (+ optional description underneath). Never truncates with "..."; the owner re-layouts when text changes.
+-- B.layout(titleWidth, descWidth) positions both labels and returns the total height.
+function State.labelBlock(parent, x, y, text, desc, size, color, font, minH)
+	local B = {}
+	local function props(extra)
+		local p = { TextWrapped = true, TextTruncate = Enum.TextTruncate.None, TextYAlignment = Enum.TextYAlignment.Top }
+		for k, v in pairs(extra or {}) do p[k] = v end
+		return p
+	end
+	local function changed() if B.changed then B.changed() end end
+	B.title = createLabel(parent, text, size, color, font or FONT, props())
+	B.title:GetPropertyChangedSignal("Text"):Connect(changed)
+	local function addDesc(t)
+		B.desc = createLabel(parent, t, math.max(9, size - 2), C.sub, FONT, props({ NoTitle = true }))
+		B.desc:GetPropertyChangedSignal("Text"):Connect(changed)
+	end
+	if desc and desc ~= "" then addDesc(tostring(desc)) end
+	function B.setDesc(t)
+		t = t and tostring(t) or ""
+		if not B.desc then
+			if t == "" then return end
+			addDesc(t)
+		end
+		B.desc.Text = t
+		B.desc.Visible = t ~= ""
+		changed()
+	end
+	function B.layout(tw, dw)
+		tw = math.max(20, tw)
+		dw = math.max(20, dw or tw)
+		local t = B.title
+		local one = State.textH("A", t.TextSize, t.Font, tw)
+		local th = math.max(one, State.textH(t.Text, t.TextSize, t.Font, tw))
+		local top = math.max(0, math.floor(((minH or one) - one) / 2))
+		t.Position = UDim2.fromOffset(x, y + top)
+		t.Size = UDim2.fromOffset(tw, th)
+		local h = top + th
+		local d = B.desc
+		if d and d.Text ~= "" then
+			local dh = State.textH(d.Text, d.TextSize, d.Font, dw)
+			d.Position = UDim2.fromOffset(x, y + h + 2)
+			d.Size = UDim2.fromOffset(dw, dh)
+			h += 2 + dh
+		end
+		B.Height = math.max(minH or 0, h + top)
+		return B.Height
+	end
+	return B
+end
+
 
 State.sounds = false
 do
@@ -1081,12 +1140,13 @@ local function createInfoRow(parent, x, y, w, key, value, iconBuilder)
 	return vl
 end
 
-local function createCheckbox(parent, x, y, w, text, default, onToggle)
-	local row = createButton(parent, { Position = UDim2.fromOffset(x, y), AnchorPoint = Vector2.new(0, 0.5), Size = UDim2.fromOffset(w, 20) })
+local function createCheckbox(parent, x, y, w, text, default, onToggle, desc, onResize)
+	local row = createButton(parent, { Position = UDim2.fromOffset(x, y - 10), Size = UDim2.fromOffset(w, 20) })
 	local box = createFrame(row, { Position = UDim2.fromOffset(0, 3), Size = UDim2.fromOffset(14, 14), BackgroundColor3 = C.bg })
 	corner(box, 3)
 	local boxStroke = stroke(box, C.line, 1)
-	local label = createLabel(row, text, 12, C.dim, FONT, { Position = UDim2.fromOffset(24, 0), Size = UDim2.new(1, -24, 1, 0) })
+	local B = State.labelBlock(row, 24, 0, text, desc, 12, C.dim, FONT, 20)
+	local label = B.title
 
 	local check = create("CanvasGroup", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, GroupTransparency = 1 }, box)
 	local checkScale = create("UIScale", { Scale = 0.5 }, check)
@@ -1096,6 +1156,14 @@ local function createCheckbox(parent, x, y, w, text, default, onToggle)
 		corner(f, 1)
 		table.insert(marks, f)
 	end
+
+	local function relayout()
+		local h = B.layout(w - 24)
+		row.Size = UDim2.fromOffset(w, h)
+		if onResize then onResize(h) end
+	end
+	B.changed = relayout
+	relayout()
 
 	local state = default and true or false
 	local api = {}
@@ -1115,6 +1183,8 @@ local function createCheckbox(parent, x, y, w, text, default, onToggle)
 		if not silent and State.touch then State.touch() end
 	end
 	function api.Get() return state end
+	function api.SetTitle(t) label.Text = State.titleCase(tostring(t)) end
+	function api.SetDesc(t) B.setDesc(t) end
 	State.regAdd(parent, "cb:" .. text, function() return state end, function(v) if state ~= (v and true or false) then api.Set(v and true or false) end end)
 
 	row.Activated:Connect(function() api.Set(not state) end)
@@ -1178,9 +1248,17 @@ end
 
 local function createSlider(parent, x, y, w, cfg)
 	local min, max, dec = cfg.min, cfg.max, cfg.decimals or 0
-	createLabel(parent, cfg.label, 11, C.text, FONT, { Position = UDim2.fromOffset(x, y), AnchorPoint = Vector2.new(0, 0.5), Size = UDim2.fromOffset(w - 50, 16) })
+	local function fmt(v) return string.format("%." .. dec .. "f", v) .. (cfg.suffix or "") end
+	-- reserve enough room on the right for the widest value so the title wraps instead of colliding with it
+	local reserve = 50
+	pcall(function()
+		local TS = game:GetService("TextService")
+		for _, v in ipairs({ min, max }) do reserve = math.max(reserve, TS:GetTextSize(fmt(v), 11, FONT, Vector2.new(1000, 20)).X + 6) end
+	end)
+	local B = State.labelBlock(parent, x, y - 8, cfg.label, cfg.desc, 11, C.text, FONT, 16)
 	local valueLabel = createLabel(parent, "", 11, C.sub, FONT, {
-		Position = UDim2.fromOffset(x + w, y), AnchorPoint = Vector2.new(1, 0.5), Size = UDim2.fromOffset(50, 16), TextXAlignment = Enum.TextXAlignment.Right,
+		Position = UDim2.fromOffset(x + w, y), AnchorPoint = Vector2.new(1, 0.5), Size = UDim2.fromOffset(reserve, 16), TextXAlignment = Enum.TextXAlignment.Right,
+		TextTruncate = Enum.TextTruncate.None,
 	})
 	local track = createFrame(parent, { Position = UDim2.fromOffset(x, y + 10), AnchorPoint = Vector2.new(0, 0.5), Size = UDim2.fromOffset(w, 3), BackgroundColor3 = C.track })
 	corner(track, 2)
@@ -1189,6 +1267,16 @@ local function createSlider(parent, x, y, w, cfg)
 	local handle = createFrame(track, { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0, 0.5), Size = UDim2.fromOffset(9, 9), BackgroundColor3 = C.white })
 	corner(handle, 999)
 	local hit = createButton(parent, { Position = UDim2.fromOffset(x, y + 2), Size = UDim2.fromOffset(w, 16) })
+
+	local function relayout()
+		local h = B.layout(w - reserve - 4, w)
+		local ty = (y - 8) + h + 2
+		track.Position = UDim2.fromOffset(x, ty)
+		hit.Position = UDim2.fromOffset(x, ty - 8)
+		if cfg.onResize then cfg.onResize(ty - (y - 8) + 14) end
+	end
+	B.changed = relayout
+	relayout()
 
 	local cur = cfg.value
 	local function set(v, instant, silent)
@@ -1199,7 +1287,7 @@ local function createSlider(parent, x, y, w, cfg)
 		local t = instant and 0 or 0.08
 		tween(fill, t, { Size = UDim2.fromScale(r, 1) })
 		tween(handle, t, { Position = UDim2.fromScale(r, 0.5) })
-		valueLabel.Text = string.format("%." .. dec .. "f", v) .. (cfg.suffix or "")
+		valueLabel.Text = fmt(v)
 		if cfg.onChange and not silent then cfg.onChange(v) end
 		if not silent and State.touch then State.touch() end
 	end
@@ -1209,7 +1297,12 @@ local function createSlider(parent, x, y, w, cfg)
 	hit.MouseLeave:Connect(function() tween(handle, 0.12, { Size = UDim2.fromOffset(9, 9) }) end)
 	set(cfg.value, true)
 	State.regAdd(parent, "sl:" .. tostring(cfg.label), function() return cur end, function(v) if type(v) == "number" then set(v, true) end end)
-	return { Set = function(v, instant) set(v, instant, true) end, Get = function() return cur end }
+	return {
+		Set = function(v, instant) set(v, instant, true) end,
+		Get = function() return cur end,
+		SetTitle = function(t) B.title.Text = State.titleCase(tostring(t)) end,
+		SetDesc = function(t) B.setDesc(t) end,
+	}
 end
 
 -- bolder, easier-to-see arrow for dropdowns
@@ -1218,20 +1311,28 @@ function Icons.chevronBold(bar)
 	bar(13.2, 9, 7, 2.4, -45)
 end
 
--- options: flat list of strings, OR a mix of strings and sections:
---   { "a", "b", { Title = "Section", Values = { "c", "d" } } }
--- dopts: { Search = true, SearchPlaceholder = "search..." }
+-- a table with Desc/Description (and no Values/Options) is an option with a description, e.g. { Name = "Potion", Desc = "Heals you" }
+function State.ddOption(o)
+	if type(o) ~= "table" or o.Values or o.Options then return nil end
+	local d = o.Desc or o.Description
+	local v = o.Value or o.Name or o.Title or o.Text or o[1]
+	if d ~= nil and v ~= nil then return tostring(v), tostring(d) end
+end
+
 local function createDropdown(parent, x, y, w, options, default, onChange, isData, dopts)
 	dopts = dopts or {}
 	local H = 24
 	local ROW, HEAD, MAXROWS, SEARCH_H = 24, 20, 6, 30
 	local MAXH = MAXROWS * ROW + 8
 	local hasSearch = dopts.Search and true or false
+	local curY = y
+	local innerW = w - 22 -- text width inside an option (list padding + scrollbar + button padding)
+	local descMap = dopts.Descriptions or {}
 
-	local btn = createButton(parent, { Sound = true, Position = UDim2.fromOffset(x, y), Size = UDim2.fromOffset(w, H), BackgroundColor3 = C.field, BackgroundTransparency = 0 })
+	local btn = createButton(parent, { Sound = true, Position = UDim2.fromOffset(x, curY), Size = UDim2.fromOffset(w, H), BackgroundColor3 = C.field, BackgroundTransparency = 0 })
 	corner(btn, 6)
 	local bs = stroke(btn, C.line, 1)
-	local label = createLabel(btn, default, 12, C.text, FONT, { Position = UDim2.fromOffset(10, 0), Size = UDim2.new(1, -34, 1, 0) })
+	local label = createLabel(btn, default, 12, C.text, FONT, { Position = UDim2.fromOffset(10, 0), Size = UDim2.new(1, -34, 1, 0), TextWrapped = true, TextTruncate = Enum.TextTruncate.None })
 	if isData then label:SetAttribute("NoTranslate", true) end
 
 	-- arrow indicator
@@ -1241,11 +1342,28 @@ local function createDropdown(parent, x, y, w, options, default, onChange, isDat
 
 	local listH = 0
 	local list = createFrame(parent, {
-		Position = UDim2.fromOffset(x, y + H + 4), Size = UDim2.fromOffset(w, 0), BackgroundColor3 = C.field,
+		Position = UDim2.fromOffset(x, curY + H + 4), Size = UDim2.fromOffset(w, 0), BackgroundColor3 = C.field,
 		ClipsDescendants = true, Visible = false, ZIndex = 40,
 	})
 	corner(list, 6)
 	stroke(list, C.line, 1)
+
+	local function place()
+		btn.Position = UDim2.fromOffset(x, curY)
+		list.Position = UDim2.fromOffset(x, curY + H + 4)
+	end
+	-- long selected values wrap and the button grows instead of showing "..."
+	local function faceLayout()
+		local th = State.textH(label.Text, 12, label.Font, w - 34)
+		local nh = math.max(24, th + 10)
+		if nh ~= H then
+			H = nh
+			btn.Size = UDim2.fromOffset(w, H)
+			place()
+		end
+		if dopts.OnResize then dopts.OnResize(H) end
+	end
+	label:GetPropertyChangedSignal("Text"):Connect(faceLayout)
 
 	-- optional search bar
 	local searchBox
@@ -1313,10 +1431,26 @@ local function createDropdown(parent, x, y, w, options, default, onChange, isDat
 		end
 	end
 
+	-- total list height from the visible items (rows can be different heights now: wrapped text, descriptions)
+	local function relist()
+		local any = false
+		local contentH = 8
+		for _, it in ipairs(items) do
+			if it.inst.Visible then
+				contentH += it.h
+				if it.kind == "opt" then any = true end
+			end
+		end
+		empty.Visible = not any
+		if not any then contentH = 8 + 28 end
+		listH = topOff + math.min(contentH, MAXH)
+		if open then tween(list, 0.15, { Size = UDim2.fromOffset(w, listH) }, Enum.EasingStyle.Quint) end
+	end
+
 	-- filter by search text + hide section headers with no matches
 	local function refilter()
 		local q = searchBox and searchBox.Text:lower() or ""
-		local headIdx, any = nil, false
+		local headIdx = nil
 		local headHas = {}
 		for i, it in ipairs(items) do
 			if it.kind == "head" then
@@ -1324,22 +1458,14 @@ local function createDropdown(parent, x, y, w, options, default, onChange, isDat
 				headHas[i] = false
 			else
 				it.match = q == "" or it.text:lower():find(q, 1, true) ~= nil
-				if it.match then
-					any = true
-					if headIdx then headHas[headIdx] = true end
-				end
+				if it.match and headIdx then headHas[headIdx] = true end
 			end
 		end
-		local contentH = 8
 		for i, it in ipairs(items) do
 			local vis = it.kind == "head" and headHas[i] or it.match
 			it.inst.Visible = vis and true or false
-			if vis then contentH += (it.kind == "head" and HEAD or ROW) end
 		end
-		empty.Visible = not any
-		if not any then contentH = 8 + 28 end
-		listH = topOff + math.min(contentH, MAXH)
-		if open then tween(list, 0.15, { Size = UDim2.fromOffset(w, listH) }, Enum.EasingStyle.Quint) end
+		relist()
 		sf.CanvasPosition = Vector2.zero
 	end
 
@@ -1347,35 +1473,75 @@ local function createDropdown(parent, x, y, w, options, default, onChange, isDat
 		for _, it in ipairs(items) do it.inst:Destroy() end
 		items, optionButtons = {}, {}
 		local order = 0
-		local function addOption(text)
+		local function addOption(text, desc)
 			order += 1
 			local sc = text == sel
+			if desc == nil then desc = descMap[text] end
+			local hasDesc = desc ~= nil and desc ~= ""
 			local ob = createButton(sf, { Sound = true,
 				Size = UDim2.new(1, 0, 0, 22), Text = text, TextSize = 12, LayoutOrder = order, Font = sc and FONT_BOLD or FONT,
-				TextColor3 = sc and C.accent or C.sub, TextXAlignment = Enum.TextXAlignment.Left, BackgroundColor3 = C.accent, TextTruncate = Enum.TextTruncate.AtEnd,
+				TextColor3 = sc and C.accent or C.sub, TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = hasDesc and Enum.TextYAlignment.Top or Enum.TextYAlignment.Center,
+				BackgroundColor3 = C.accent, TextWrapped = true, TextTruncate = Enum.TextTruncate.None,
 			})
 			corner(ob, 4)
-			create("UIPadding", { PaddingLeft = UDim.new(0, 8) }, ob)
+			create("UIPadding", {
+				PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 4),
+				PaddingTop = UDim.new(0, hasDesc and 4 or 0), PaddingBottom = UDim.new(0, hasDesc and 4 or 0),
+			}, ob)
+			local dl
+			if hasDesc then
+				dl = createLabel(ob, tostring(desc), 10, C.sub, FONT, {
+					Size = UDim2.new(1, 0, 0, 12), TextWrapped = true, TextTruncate = Enum.TextTruncate.None,
+					TextYAlignment = Enum.TextYAlignment.Top, NoTitle = true,
+				})
+			end
 			if isData then ob:SetAttribute("NoTranslate", true) end
+			local it = { kind = "opt", text = text, inst = ob, match = true, h = 24 }
+			local function measure()
+				local th = State.textH(ob.Text, 12, FONT_BOLD, innerW)
+				local bh
+				if dl then
+					local dh = State.textH(dl.Text, 10, FONT, innerW)
+					dl.Position = UDim2.fromOffset(0, th + 1)
+					dl.Size = UDim2.new(1, 0, 0, dh)
+					bh = th + 1 + dh + 8
+				else
+					bh = math.max(22, th + 8)
+				end
+				ob.Size = UDim2.new(1, 0, 0, bh)
+				it.h = bh + 2
+			end
+			measure()
+			ob:GetPropertyChangedSignal("Text"):Connect(function() measure() relist() end)
+			if dl then dl:GetPropertyChangedSignal("Text"):Connect(function() measure() relist() end) end
 			optionButtons[text] = ob
-			table.insert(items, { kind = "opt", text = text, inst = ob, match = true })
+			table.insert(items, it)
 			ob.MouseEnter:Connect(function() tween(ob, 0.1, { BackgroundTransparency = 0.88 }) end)
 			ob.MouseLeave:Connect(function() tween(ob, 0.1, { BackgroundTransparency = 1 }) end)
 			ob.Activated:Connect(function() choose(text) end)
 		end
 		local function addHeader(text)
 			order += 1
-			local hd = createLabel(sf, text, 10, C.dim, FONT_BOLD, { Size = UDim2.new(1, 0, 0, 18), LayoutOrder = order, NoTitle = true })
+			local hd = createLabel(sf, text, 10, C.dim, FONT_BOLD, { Size = UDim2.new(1, 0, 0, 18), LayoutOrder = order, NoTitle = true, TextWrapped = true, TextTruncate = Enum.TextTruncate.None })
 			hd.Text = string.upper(text)
 			create("UIPadding", { PaddingLeft = UDim.new(0, 8) }, hd)
 			hd:SetAttribute("NoTranslate", true)
-			table.insert(items, { kind = "head", text = text, inst = hd })
+			local hh = math.max(18, State.textH(hd.Text, 10, FONT_BOLD, innerW) + 4)
+			hd.Size = UDim2.new(1, 0, 0, hh)
+			table.insert(items, { kind = "head", text = text, inst = hd, h = hh + 2 })
+		end
+		local function addAny(v)
+			local ov, od = State.ddOption(v)
+			if ov then addOption(ov, od) else addOption(tostring(v)) end
 		end
 		for _, o in ipairs(opts) do
-			if type(o) == "table" then
+			local ov, od = State.ddOption(o)
+			if ov then
+				addOption(ov, od)
+			elseif type(o) == "table" then
 				local title = o.Title or o.Name or o.Section
 				if title then addHeader(tostring(title)) end
-				for _, v in ipairs(o.Values or o.Options or o) do addOption(tostring(v)) end
+				for _, v in ipairs(o.Values or o.Options or o) do addAny(v) end
 			else
 				addOption(tostring(o))
 			end
@@ -1386,15 +1552,19 @@ local function createDropdown(parent, x, y, w, options, default, onChange, isDat
 		refilter()
 	end
 	build(options, default)
+	faceLayout()
 
 	if searchBox then
 		searchBox:GetPropertyChangedSignal("Text"):Connect(refilter)
-		-- Enter picks the first visible match
+		-- Enter only picks something when the search narrowed it down to exactly one option;
+		-- otherwise the filtered list stays open so you choose from it yourself
 		searchBox.FocusLost:Connect(function(enter)
 			if not enter then return end
+			local only, n = nil, 0
 			for _, it in ipairs(items) do
-				if it.kind == "opt" and it.match then choose(it.text) return end
+				if it.kind == "opt" and it.match then n += 1 only = it end
 			end
+			if n == 1 then choose(only.text) end
 		end)
 	end
 
@@ -1409,9 +1579,11 @@ local function createDropdown(parent, x, y, w, options, default, onChange, isDat
 		State.regAdd(parent, "dd:" .. x .. ":" .. y, function() return current end, function(opt) if optionButtons[opt] and opt ~= current then choose(opt) end end)
 	end
 	return {
-		SetOptions = function(opts, sel) build(opts, sel or current) end,
+		SetOptions = function(opts, sel) build(opts, sel or current) faceLayout() end,
 		Set = function(opt, silent) if optionButtons[opt] then choose(opt, silent) end end,
 		Get = function() return current end,
+		SetY = function(ny) curY = ny place() end,
+		GetHeight = function() return H end,
 	}
 end
 
@@ -1487,13 +1659,20 @@ local function createActionButton(parent, x, y, w, text, onClick, filled)
 	local function base() return filled and C.accent or C.field end
 	local function hover() return filled and C.accentHover or C.hoverField end
 	local btn = createButton(parent, { Sound = true,
-		Position = UDim2.fromOffset(x, y), AnchorPoint = Vector2.new(0, 0.5), Size = UDim2.fromOffset(w, 24),
+		Position = UDim2.fromOffset(x, y - 12), Size = UDim2.fromOffset(w, 24),
 		BackgroundColor3 = base(), BackgroundTransparency = 0, Text = text, TextSize = 12, Font = FONT_BOLD,
-		TextColor3 = filled and C.bg or C.text,
+		TextColor3 = filled and C.bg or C.text, TextWrapped = true, TextTruncate = Enum.TextTruncate.None,
 	})
 	corner(btn, 6)
+	create("UIPadding", { PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8) }, btn)
 	local s = stroke(btn, filled and C.accent or C.line, 1)
-	State.fitText(btn, w, 12, 7, FONT_BOLD)
+	-- long text wraps and the button grows instead of showing "..."
+	local function fit()
+		local th = State.textH(btn.Text, btn.TextSize, btn.Font, w - 16)
+		btn.Size = UDim2.fromOffset(w, math.max(24, th + 10))
+	end
+	btn:GetPropertyChangedSignal("Text"):Connect(fit)
+	fit()
 	local press = create("UIScale", {}, btn)
 	btn.MouseEnter:Connect(function()
 		tween(btn, 0.1, { BackgroundColor3 = hover() })
@@ -1695,11 +1874,19 @@ local function notify(title, text)
 	corner(toast, 8)
 	local toastStroke = stroke(toast, C.accent, 1, 1)
 	createFrame(toast, { Size = UDim2.new(0, 3, 1, 0), BackgroundColor3 = C.accent })
-	createLabel(toast, title, 12, C.white, FONT_BOLD, { Position = UDim2.fromOffset(14, 9), Size = UDim2.new(1, -22, 0, 14), TextTruncate = Enum.TextTruncate.AtEnd })
-	createLabel(toast, text, 11, C.sub, FONT, { Position = UDim2.fromOffset(14, 25), Size = UDim2.new(1, -22, 0, 14), TextTruncate = Enum.TextTruncate.AtEnd })
+	-- wrap long titles/messages and grow the toast instead of cutting them off with "..."
+	local tw = 240 - 22
+	local th = math.max(14, State.textH(title, 12, FONT_BOLD, tw))
+	local hasText = text ~= nil and text ~= ""
+	local dh = hasText and math.max(14, State.textH(text, 11, FONT, tw)) or 0
+	toast.Size = UDim2.fromOffset(240, math.max(46, 9 + th + (hasText and (2 + dh) or 0) + 9))
+	createLabel(toast, title, 12, C.white, FONT_BOLD, { Position = UDim2.fromOffset(14, 9), Size = UDim2.fromOffset(tw, th), TextWrapped = true, TextTruncate = Enum.TextTruncate.None, TextYAlignment = Enum.TextYAlignment.Top })
+	if hasText then
+		createLabel(toast, text, 11, C.sub, FONT, { Position = UDim2.fromOffset(14, 9 + th + 2), Size = UDim2.fromOffset(tw, dh), TextWrapped = true, TextTruncate = Enum.TextTruncate.None, TextYAlignment = Enum.TextYAlignment.Top })
+	end
 	tween(toast, 0.25, { GroupTransparency = 0 })
 	tween(toastStroke, 0.25, { Transparency = 0.6 })
-	task.delay(2.6, function()
+	task.delay(2.6 + math.min(4, (th + dh) / 40), function()
 		tween(toast, 0.3, { GroupTransparency = 1 })
 		tween(toastStroke, 0.3, { Transparency = 1 })
 		task.wait(0.32)
@@ -14840,13 +15027,17 @@ function State.buildNauru()
 		if def == nil then def = cfg.Value end
 		def = def and true or false
 		local row = addRow(tab, 28)
-		local cb = createCheckbox(row, 0, 14, W, titleOf(cfg, "toggle"), def, function(v) safe(cfg.Callback, v) end)
+		local cb = createCheckbox(row, 0, 14, W, titleOf(cfg, "toggle"), def, function(v) safe(cfg.Callback, v) end, cfg.Desc or cfg.Description, function(h)
+			row.Size = UDim2.new(1, 0, 0, math.max(28, h + 8))
+		end)
 		local obj = {}
 		bind(obj, "Set", function(v, silent)
 			cb.Set(v and true or false, true)
 			if not silent then safe(cfg.Callback, v and true or false) end
 		end)
 		bind(obj, "Get", function() return cb.Get() end)
+		bind(obj, "SetTitle", function(t) cb.SetTitle(t) end)
+		bind(obj, "SetDesc", function(t) cb.SetDesc(t) end)
 		if def then task.defer(safe, cfg.Callback, true) end
 		return finish(row, obj)
 	end
@@ -14876,8 +15067,9 @@ function State.buildNauru()
 		local row = addRow(tab, 32)
 		local ready = false
 		local sl = createSlider(row, 0, 8, W, {
-			label = titleOf(cfg, "slider"), min = min, max = max, value = def, decimals = dec, suffix = cfg.Suffix,
+			label = titleOf(cfg, "slider"), desc = cfg.Desc or cfg.Description, min = min, max = max, value = def, decimals = dec, suffix = cfg.Suffix,
 			onChange = function(x) if ready then safe(cfg.Callback, x) end end,
+			onResize = function(h) row.Size = UDim2.new(1, 0, 0, h) end,
 		})
 		ready = true
 		local obj = {}
@@ -14886,6 +15078,8 @@ function State.buildNauru()
 			if not silent then safe(cfg.Callback, sl.Get()) end
 		end)
 		bind(obj, "Get", function() return sl.Get() end)
+		bind(obj, "SetTitle", function(t) sl.SetTitle(t) end)
+		bind(obj, "SetDesc", function(t) sl.SetDesc(t) end)
 		task.defer(safe, cfg.Callback, def)
 		return finish(row, obj)
 	end
@@ -14895,8 +15089,35 @@ function State.buildNauru()
 		local cfg = cfgOf(a, { "Title", "Callback" }, b)
 		local row = addRow(tab, 28)
 		local btn = createActionButton(row, 0, 14, W, titleOf(cfg, "button"), function() safe(cfg.Callback) end, cfg.Filled or cfg.Primary)
+		local dl
+		local function relayout()
+			local bh = btn.Size.Y.Offset
+			local h = 2 + bh + 2
+			if dl and dl.Text ~= "" then
+				local dh = State.textH(dl.Text, dl.TextSize, dl.Font, W)
+				dl.Position = UDim2.fromOffset(0, 2 + bh + 3)
+				dl.Size = UDim2.fromOffset(W, dh)
+				h += 3 + dh + 2
+			end
+			row.Size = UDim2.new(1, 0, 0, h)
+		end
+		local function setDesc(t)
+			t = t and tostring(t) or ""
+			if not dl then
+				if t == "" then return end
+				dl = createLabel(row, t, 10, C.sub, FONT, { TextWrapped = true, TextTruncate = Enum.TextTruncate.None, TextYAlignment = Enum.TextYAlignment.Top, NoTitle = true })
+				dl:GetPropertyChangedSignal("Text"):Connect(relayout)
+			end
+			dl.Text = t
+			dl.Visible = t ~= ""
+			relayout()
+		end
+		btn:GetPropertyChangedSignal("Size"):Connect(relayout)
+		setDesc(cfg.Desc or cfg.Description)
+		relayout()
 		local obj = {}
 		bind(obj, "SetTitle", function(t) btn.Text = t end)
+		bind(obj, "SetDesc", setDesc)
 		bind(obj, "Fire", function() safe(cfg.Callback) end)
 		return finish(row, obj)
 	end
@@ -14904,6 +15125,10 @@ function State.buildNauru()
 	-- Values can be flat or sectioned:
 	--   Values = { "a", "b" }
 	--   Values = { { Title = "Section A", Values = { "a", "b" } }, { Title = "Section B", Values = { "c" } } }
+	-- An option can carry a description:
+	--   Values = { { Name = "Health Potion", Desc = "Restores 50 HP" }, "Plain Option" }
+	--   Descriptions = { ["Plain Option"] = "also works as a lookup table" }
+	-- Desc = "..." on the dropdown itself puts a description under its title
 	-- Search = true adds a search bar to the dropdown list
 	function M.dropdown(tab, a, b, c, d)
 		local W = tab._w
@@ -14911,11 +15136,21 @@ function State.buildNauru()
 		local function norm(src)
 			local out, flat = {}, {}
 			for _, x in ipairs(src or {}) do
-				if type(x) == "table" then
+				local xv = State.ddOption(x)
+				if xv then
+					table.insert(out, x)
+					table.insert(flat, xv)
+				elseif type(x) == "table" then
 					local vals = {}
 					for _, v in ipairs(x.Values or x.Options or x) do
-						table.insert(vals, tostring(v))
-						table.insert(flat, tostring(v))
+						local vv = State.ddOption(v)
+						if vv then
+							table.insert(vals, v)
+							table.insert(flat, vv)
+						else
+							table.insert(vals, tostring(v))
+							table.insert(flat, tostring(v))
+						end
 					end
 					table.insert(out, { Title = x.Title or x.Name or x.Section, Values = vals })
 				else
@@ -14931,23 +15166,33 @@ function State.buildNauru()
 		if type(def) == "number" then def = flat[def] end
 		def = def and tostring(def) or flat[1] or ""
 		local title = cfg.Title or cfg.Name or cfg.Text
-		local top = title and 18 or 0
-		local base = top + 28
-		local row = addRow(tab, base)
-		if title then createLabel(row, title, 11, C.text, FONT, { Position = UDim2.fromOffset(0, 8), AnchorPoint = Vector2.new(0, 0.5), Size = UDim2.fromOffset(W, 16) }) end
+		local row = addRow(tab, title and 46 or 28)
+		local B = title and State.labelBlock(row, 0, 0, title, cfg.Desc or cfg.Description, 11, C.text, FONT, 16) or nil
+		local dd, list
+		local top = 0
+		local function rowH()
+			local lh = list and list.Size.Y.Offset or 0
+			return top + (dd and dd.GetHeight() or 24) + 4 + ((lh > 0) and (lh + 4) or 0)
+		end
+		local function relayout()
+			top = B and (B.layout(W) + 2) or 0
+			if dd then dd.SetY(top) end
+			row.Size = UDim2.new(1, 0, 0, rowH())
+		end
+		if B then B.changed = relayout end
+		relayout()
 		local ready = false
 		local search = cfg.Search or cfg.Searchable or cfg.SearchBar
-		local dd = createDropdown(row, 0, top, W, values, def, function(o) if ready then safe(cfg.Callback, o) end end, false, {
-			Search = search and true or false, SearchPlaceholder = cfg.SearchPlaceholder,
+		dd = createDropdown(row, 0, top, W, values, def, function(o) if ready then safe(cfg.Callback, o) end end, false, {
+			Search = search and true or false, SearchPlaceholder = cfg.SearchPlaceholder, Descriptions = cfg.Descriptions,
+			OnResize = function() relayout() end,
 		})
 		ready = true
-		local list = findPopup(row)
+		list = findPopup(row)
 		if list then
-			list:GetPropertyChangedSignal("Size"):Connect(function()
-				local h = list.Size.Y.Offset
-				row.Size = UDim2.new(1, 0, 0, base + (h > 0 and h + 4 or 0))
-			end)
+			list:GetPropertyChangedSignal("Size"):Connect(function() row.Size = UDim2.new(1, 0, 0, rowH()) end)
 		end
+		relayout()
 		local obj = {}
 		bind(obj, "Set", function(o, silent) dd.Set(tostring(o), true) if not silent then safe(cfg.Callback, dd.Get()) end end)
 		bind(obj, "Get", function() return dd.Get() end)
@@ -14955,6 +15200,7 @@ function State.buildNauru()
 			local out, fl = norm(vals)
 			dd.SetOptions(out, sel and tostring(sel) or fl[1] or "")
 		end)
+		bind(obj, "SetDesc", function(t) if B then B.setDesc(t) end end)
 		if def ~= "" then task.defer(safe, cfg.Callback, def) end
 		return finish(row, obj)
 	end
@@ -14963,14 +15209,21 @@ function State.buildNauru()
 		local W = tab._w
 		local cfg = cfgOf(a, { "Title", "Placeholder", "Callback" }, b, c)
 		local title = cfg.Title or cfg.Name or cfg.Text
-		local top = title and 16 or 0
-		local row = addRow(tab, top + 28)
-		if title then createLabel(row, title, 11, C.text, FONT, { Position = UDim2.fromOffset(0, 8), AnchorPoint = Vector2.new(0, 0.5), Size = UDim2.fromOffset(W, 16) }) end
-		local box = createTextInput(row, 0, top + 14, W, cfg.Placeholder or "type here...", function(t, enter) safe(cfg.Callback, t, enter) end)
+		local row = addRow(tab, (title and 16 or 0) + 28)
+		local B = title and State.labelBlock(row, 0, 0, title, cfg.Desc or cfg.Description, 11, C.text, FONT, 16) or nil
+		local box = createTextInput(row, 0, 14, W, cfg.Placeholder or "type here...", function(t, enter) safe(cfg.Callback, t, enter) end)
+		local function relayout()
+			local top = B and B.layout(W) or 0
+			box.Parent.Position = UDim2.fromOffset(0, top + 14)
+			row.Size = UDim2.new(1, 0, 0, top + 28)
+		end
+		if B then B.changed = relayout end
+		relayout()
 		if cfg.Default ~= nil then box.Text = tostring(cfg.Default) end
 		local obj = {}
 		bind(obj, "Set", function(t) box.Text = tostring(t) end)
 		bind(obj, "Get", function() return box.Text end)
+		bind(obj, "SetDesc", function(t) if B then B.setDesc(t) end end)
 		return finish(row, obj)
 	end
 
@@ -14989,7 +15242,10 @@ function State.buildNauru()
 		local cfg = cfgOf(a, { "Title", "Default", "Callback" }, b, c)
 		local bound = toCode(cfg.Default or cfg.Value or cfg.Key)
 		local row = addRow(tab, 28)
-		createLabel(row, titleOf(cfg, "keybind"), 12, C.text, FONT, { Position = UDim2.fromOffset(0, 14), AnchorPoint = Vector2.new(0, 0.5), Size = UDim2.fromOffset(W - 46, 16) })
+		local B = State.labelBlock(row, 0, 0, titleOf(cfg, "keybind"), cfg.Desc or cfg.Description, 12, C.text, FONT, 28)
+		local function relayout() row.Size = UDim2.new(1, 0, 0, B.layout(W - 46, W - 46)) end
+		B.changed = relayout
+		relayout()
 		local btn = createKeybind(row, W - 38, 14, bound and string.sub(string.upper(bound.Name), 1, 5) or "NONE", function(input, name)
 			if input.UserInputType == Enum.UserInputType.Keyboard then
 				bound = name ~= "NONE" and input.KeyCode or nil
@@ -15016,6 +15272,7 @@ function State.buildNauru()
 			btn.Text = bound and string.sub(string.upper(bound.Name), 1, 5) or "NONE"
 		end)
 		bind(obj, "Get", function() return bound end)
+		bind(obj, "SetDesc", function(t) B.setDesc(t) end)
 		return finish(row, obj)
 	end
 
@@ -15024,16 +15281,20 @@ function State.buildNauru()
 		local cfg = cfgOf(a, { "Title", "Default", "Callback" }, b, c)
 		local init = cfg.Default or cfg.Value or Color3.new(1, 1, 1)
 		local row = addRow(tab, 28)
-		createLabel(row, titleOf(cfg, "color"), 12, C.text, FONT, { Position = UDim2.fromOffset(0, 14), AnchorPoint = Vector2.new(0, 0.5), Size = UDim2.fromOffset(W - 34, 16) })
+		local B = State.labelBlock(row, 0, 0, titleOf(cfg, "color"), cfg.Desc or cfg.Description, 12, C.text, FONT, 28)
+		local pop
+		local function relayout()
+			local h = B.layout(W - 34, W - 34)
+			local ph = pop and pop.Size.Y.Offset or 0
+			row.Size = UDim2.new(1, 0, 0, math.max(h, ph > 0 and (27 + ph + 6) or 0))
+		end
+		B.changed = relayout
+		relayout()
 		local ready, mute = false, false
 		local cp = createColorPicker(row, W - 24, 14, init, function(col) if ready and not mute then safe(cfg.Callback, col) end end)
 		ready = true
-		local pop = findPopup(row)
-		if pop then
-			pop:GetPropertyChangedSignal("Size"):Connect(function()
-				row.Size = UDim2.new(1, 0, 0, math.max(28, 27 + pop.Size.Y.Offset + 6))
-			end)
-		end
+		pop = findPopup(row)
+		if pop then pop:GetPropertyChangedSignal("Size"):Connect(relayout) end
 		local obj = {}
 		bind(obj, "Set", function(col, silent)
 			mute = silent and true or false
@@ -15041,6 +15302,7 @@ function State.buildNauru()
 			mute = false
 		end)
 		bind(obj, "Get", function() return cp.Get() end)
+		bind(obj, "SetDesc", function(t) B.setDesc(t) end)
 		task.defer(safe, cfg.Callback, init)
 		return finish(row, obj)
 	end
