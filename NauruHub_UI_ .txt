@@ -1760,6 +1760,14 @@ local root = create("CanvasGroup", { Name = "Root", Size = UDim2.fromScale(1, 1)
 local popScale = create("UIScale", {}, root)
 popScale.Scale = 1
 local layoutFrame = createFrame(root, { Name = "Layout", Position = UDim2.fromOffset(PAD, PAD), Size = UDim2.fromOffset(460, 555) })
+-- CanvasGroups render into an offscreen texture that Roblox can fail to clear/resize when a game shows a fullscreen screen
+-- (exit menu, totem animation...), which smears and stretches the whole UI. So the window only lives inside the CanvasGroup
+-- while it is fading in/out, and sits in a plain Frame the rest of the time.
+local restRoot = createFrame(holder, { Name = "RootRest", Size = UDim2.fromScale(1, 1) })
+function State.fxMode(on)
+	local want = on and root or restRoot
+	if layoutFrame.Parent ~= want then layoutFrame.Parent = want end
+end
 
 local view = { scale = CONFIG.defaultScale, x = 0, y = 0, w = 492, h = 587 }
 local scaleSlider
@@ -6269,6 +6277,7 @@ local function setShown(v)
 	if v then
 		holder.Visible = true
 		Isl.ctl.hide()
+		State.fxMode(true)
 		root.GroupTransparency = 1
 		popScale.Scale = a.s
 		root.Position = UDim2.fromOffset(dx, dy)
@@ -6294,6 +6303,9 @@ local function setShown(v)
 			tween(popScale, a.t, { Scale = 1 }, a.style)
 		end
 		tween(root, a.t, { Position = UDim2.fromOffset(0, 0), Rotation = 0 }, a.style)
+		task.delay(math.max(a.fade or 0.25, a.t * 1.25) + 0.05, function()
+			if my == State.animTok and shown then State.fxMode(false) end
+		end)
 		if a.sheen and State.openSheen then State.openSheen.play(1.1, a.t * 0.35) end
 		if State.popCards then State.popCards() end
 	else
@@ -6302,6 +6314,7 @@ local function setShown(v)
 		if State.lib then State.lib.dismiss() end
 		local ct = math.min(a.close or 0.18, 0.16)
 		local my = State.animTok
+		State.fxMode(true)
 		tween(root, ct, { GroupTransparency = 1, Position = UDim2.fromOffset(dx * 0.4, dy * 0.4) }, a.close and Enum.EasingStyle.Sine or nil)
 		tween(popScale, ct, { Scale = a.s }, a.close and Enum.EasingStyle.Sine or nil)
 		task.delay(ct + 0.01, function()
@@ -6881,6 +6894,7 @@ do
 		State.unloading = true
 
 		local FADE = 0.4
+		State.fxMode(true)
 		tween(root, FADE, { GroupTransparency = 1 })
 		tween(dimFrame, FADE, { BackgroundTransparency = 1 })
 		local function fadeTree(top)
